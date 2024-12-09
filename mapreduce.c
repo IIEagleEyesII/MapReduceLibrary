@@ -4,6 +4,22 @@
 #include <string.h>
 #include <pthread.h>
 #include <assert.h>
+/************************************************************************************************************************
+ * The chosen data structure for this project is a two leveled thread safe linked list                                  *
+ * The choice was motivated by the nature of the MapReduce problem,                                                     *
+ *   since linked lists allow dynamic inserts, deletes and using a lock makes them safe for multi-thread programs.      *
+ * The partition linked list uses nodes of level 1 (entry_t) corresponding to the keys.                                 *
+ * The entry_t linked list uses nodes of level 2 (values_t) where the associated values will be stored.                 *
+ * The values are directly grouped together in the mapping phase following the next execution :                         *
+ *   ->Finding an entry with the same key (O(n) in worst case).                                                         *
+ *   ->Inserting the value at the beginning (O(1)).                                                                     *
+ * Locks are only used in the mapping phase on a partition tp deal with concurrency, but not                            *
+ *   in the reducing phase since a partition is being accessed by one thread only.                                      *
+ * One line has been added to the Reduce function to match the code structure thus avoiding memory leaks.               *
+ * When getting the next value in the reduce phase, the 2nd level node is deleted and the head points to its next,      *
+ *   resulting in a O(1) for every value read.                                                                          *
+ ***********************************************************************************************************************/
+
 
 
 
@@ -20,7 +36,7 @@ typedef struct entry {
     values_t* head;  // Head of the Level 2 node list (values)
 } entry_t;
 
-// Partition structure for thread safety (Linked_List)
+// Linked_List structure for thread safety
 typedef struct partition {
     entry_t* head;
     pthread_mutex_t lock;
@@ -30,6 +46,7 @@ typedef struct partition {
 // Global variables
 partition_t *partitions;
 int num_partitions;
+Partitioner partitioner_; //MrDefaultHash by default
 
 // Helper function to generate a new entry node
 entry_t* generate_entry(char* key) {
@@ -43,7 +60,7 @@ entry_t* generate_entry(char* key) {
 
 // Function to get an entry or create a new one for the given key
 entry_t* get_entry(char* key) {
-    unsigned long partition_number = MR_DefaultHashPartition(key, num_partitions);  // Find the corresponding partition
+    unsigned long partition_number = partitioner_(key, num_partitions);  // Find the corresponding partition
     entry_t* current = partitions[partition_number].head;
 
     // Traverse the list to find an entry with the key
@@ -69,12 +86,12 @@ char* get_next(char* key, int partition_number) {
 
     while (entry) {
         if (strcmp(entry->key, key) == 0) {
-            values_t *vhead = entry->head;
-            if (vhead) {
-                char* ret_val = strdup(vhead->value);
-                entry->head = vhead->next;
-                free(vhead->value);  // Free the value string
-                free(vhead);         // Free the value node
+            values_t *value_head = entry->head;
+            if (value_head) {
+                char* ret_val = strdup(value_head->value); //Will be freed after usage in Reduce
+                entry->head = value_head->next;
+                free(value_head->value);  // Free the value string
+                free(value_head);         // Free the value node
                 return ret_val;
             }
             break;
@@ -84,7 +101,7 @@ char* get_next(char* key, int partition_number) {
     return NULL;
 }
 
-
+//Structure to group argues passed to reduce_
 typedef struct reduce_args{
     Reducer  reducer;
     int  partition_num;
@@ -104,6 +121,7 @@ void reduce_(reduce_args_t * args) {
     free(args);
 }
 
+//To free the memory
 void cleanup_partitions() {
     for (int i = 0; i < num_partitions; i++) {
         entry_t* entry = partitions[i].head;
@@ -127,7 +145,7 @@ void cleanup_partitions() {
 
 
 //Prints the partition's content
-void display_partitions(){
+__attribute__((unused)) void display_partitions(){
     for(int i=0;i<num_partitions;i++){
         entry_t * entry = partitions[i].head;
         while (entry){
@@ -143,27 +161,28 @@ void display_partitions(){
     }
 }
 
-// Function to emit key-value pairs during the Map phase
+
 void MR_Emit(char* key, char* value) {
-    unsigned long partition_number = MR_DefaultHashPartition(key, num_partitions);
-    pthread_mutex_lock(&partitions[partition_number].lock);
+    unsigned long partition_number = partitioner_(key, num_partitions);
+    pthread_mutex_lock(&partitions[partition_number].lock); //Lock to prevent concurrency issues
 
     // Get or create the entry for the key
     entry_t* entry = get_entry(key);
 
     // Create a new Level 2 node for the value
-    values_t* nodelvl2 = malloc(sizeof(values_t));
-    nodelvl2->value = strdup(value);  // Copy the value
-    nodelvl2->next = entry->head;     // Insert at the beginning of the Level 2 list
-    entry->head = nodelvl2;
+    values_t* value_ = malloc(sizeof(values_t));
+    value_->value = strdup(value);  // Copy the value
+    value_->next = entry->head;     // Insert at the beginning of the Level 2 list
+    entry->head = value_;
 
     pthread_mutex_unlock(&partitions[partition_number].lock);  // Unlock after modification
 }
 
 // MR_Run implementation: Runs the Map-Reduce process
-void MR_Run(int argc, char* argv[], Mapper map, int num_mappers, Reducer reduce, int num_reducers, Partitioner partition) {
+void MR_Run(int argc, char* argv[], Mapper map, int num_mappers, Reducer reduce, int num_reducers, Partitioner partitioner) {
     // Initialize partitions and threads
     num_partitions = num_reducers;
+    partitioner_ = partitioner;
     partitions = malloc(num_partitions * sizeof(partition_t));
     for (int i = 0; i < num_partitions; i++) {  // Initialize the partitions
         partitions[i].head = NULL;
@@ -174,40 +193,34 @@ void MR_Run(int argc, char* argv[], Mapper map, int num_mappers, Reducer reduce,
     pthread_t reducer_threads[num_reducers];  // Initialize reducers
 
     // Map phase
-    for (int i = 1; i < argc; i++) {  // Skipping executable file argv[0]
+    for (int i = 1; i < argc; i++) {  // evenly handle files to reducers
         pthread_create(&mapper_threads[(i - 1) % num_mappers], NULL, (void *) map, (void *) argv[i]);
     }
 
     for (int i = 0; i < num_mappers; i++) {  // Wait for all mapper threads to complete their tasks
         pthread_join(mapper_threads[i], NULL);
     }
-    display_partitions();
 
-    //TODO start debugging from here
+    //display_partitions();
+
     for (int i = 0; i < num_reducers; i++) {
         reduce_args_t * reduceArgs = malloc(sizeof(reduce_args_t));
         reduceArgs->reducer = reduce;
         reduceArgs->partition_num = i;
-        //printf("Here partition number : %i\n",i);
-        if (pthread_create(&reducer_threads[i], NULL, (void *) reduce_, (void *) reduceArgs)) {
-            fprintf(stderr, "Error creating reducer thread %d\n", i);
-            exit(1);
-        }
+        pthread_create(&reducer_threads[i], NULL, (void *) reduce_, (void *) reduceArgs);
     }
 
     for (int i = 0; i < num_reducers; i++) {
         pthread_join(reducer_threads[i], NULL);
     }
-    //TODO : clean reduceArgs
     cleanup_partitions();
 
 }
 
 
-// MR_DefaultHashPartition implementation (for hashing keys to partitions)
 unsigned long MR_DefaultHashPartition(char* key, int num_partitions_) {
     unsigned long hash = 5381;
-    int c;
+    unsigned char c;
     while ((c = *key++) != '\0') {
         hash = hash * 33 + c;
     }

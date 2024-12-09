@@ -1,8 +1,8 @@
 /***********************************************
  * Project 4: Map-Reduce
  *
- * Group Number :
- * Students     :
+ * Group Number : 7
+ * Students     : Abdel Rahman MAHROUS | Achraf ATOINI
  *
  * Please add details if compilation of your project is not
  * straightforward (for instance, if you use a different
@@ -38,10 +38,8 @@ void Reduce(char *key, Getter get_next, int partition_number) {
     char *value;
     while ((value = get_next(key, partition_number)) != NULL){
         count++;
-        //printf("Got value: %s for key: %s\n", value, key);
         free(value);
     }
-
     printf("%s %d\n", key, count); // word "key" appears "count" times
 }
 
