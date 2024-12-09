@@ -4,9 +4,7 @@
  * Group Number : 7
  * Students     : Abdel Rahman MAHROUS | Achraf ATOINI
  *
- * Please add details if compilation of your project is not
- * straightforward (for instance, if you use a different
- * structure than outlined in the project statement).
+ * tested using : gcc main.c mapreduce.c -o main
  ***********************************************/
 
 #include <assert.h>
